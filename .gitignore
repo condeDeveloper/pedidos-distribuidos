@@ -1,0 +1,15 @@
+bin/
+obj/
+TestResults/
+*.user
+*.suo
+.vs/
+.idea/
+.DS_Store
+Thumbs.db
+
+# locais
+*.db
+*.db-shm
+*.db-wal
+.env
