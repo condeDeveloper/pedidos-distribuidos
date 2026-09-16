@@ -1,0 +1,125 @@
+name: pedidos
+
+services:
+  # ---------------- aplicação ----------------
+  api:
+    build:
+      context: .
+      dockerfile: src/Pedidos.Api/Dockerfile
+    image: pedidos-api:local
+    ports:
+      - "8080:8080"
+    environment:
+      Banco__Provedor: Postgres
+      Banco__AplicarMigrations: "true"
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=pedidos;Username=pedidos;Password=${POSTGRES_PASSWORD:-pedidos}
+      Mensageria__Provedor: RabbitMq
+      ConnectionStrings__RabbitMq: amqp://pedidos:${RABBITMQ_PASSWORD:-pedidos}@rabbitmq:5672/
+      Cache__Provedor: Redis
+      ConnectionStrings__Redis: redis:6379
+      Otlp__Endpoint: http://jaeger:4317
+      Jwt__Chave: ${JWT_CHAVE:-chave-de-desenvolvimento-troque-em-producao-0123456789}
+      Auth__Usuario: ${AUTH_USUARIO:-admin}
+      Auth__Senha: ${AUTH_SENHA:-admin}
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: src/Pedidos.Worker/Dockerfile
+    image: pedidos-worker:local
+    environment:
+      Banco__Provedor: Postgres
+      Banco__AplicarMigrations: "false"   # a API aplica as migrations; o worker só espera ela ficar saudável
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=pedidos;Username=pedidos;Password=${POSTGRES_PASSWORD:-pedidos}
+      Mensageria__Provedor: RabbitMq
+      ConnectionStrings__RabbitMq: amqp://pedidos:${RABBITMQ_PASSWORD:-pedidos}@rabbitmq:5672/
+      Cache__Provedor: Redis
+      ConnectionStrings__Redis: redis:6379
+    depends_on:
+      api: { condition: service_healthy }
+    deploy:
+      replicas: 2                        # dois consumidores competindo na mesma fila
+    restart: unless-stopped
+
+  # ---------------- dependências ----------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pedidos
+      POSTGRES_USER: pedidos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pedidos}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-dados:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pedidos -d pedidos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: pedidos
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-pedidos}
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # painel de administração
+    volumes:
+      - rabbitmq-dados:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------- observabilidade ----------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # interface dos traces
+      - "4317:4317"     # OTLP gRPC
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_SENHA:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - jaeger
+
+volumes:
+  postgres-dados:
+  rabbitmq-dados:
