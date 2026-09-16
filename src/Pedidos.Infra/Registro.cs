@@ -1,6 +1,12 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Caching.StackExchangeRedis;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Pedidos.Aplicacao;
 using Pedidos.Infra.Mensageria;
 using Pedidos.Infra.Persistencia;
@@ -26,17 +32,21 @@ public static class RegistroInfra
         AplicarMigrations = config.GetValue("Banco:AplicarMigrations", true),
     };
 
+    /// <summary>
+    /// Os provedores são decididos quando o container resolve cada serviço, e não na hora de registrar. Assim a
+    /// configuração que chega depois (variáveis de ambiente, WebApplicationFactory nos testes) ainda é respeitada.
+    /// </summary>
     public static IServiceCollection AdicionarInfra(this IServiceCollection services, IConfiguration config)
     {
-        var op = LerOpcoes(config);
-        services.AddSingleton(op);
+        services.AddSingleton(sp => LerOpcoes(sp.GetRequiredService<IConfiguration>()));
 
-        services.AddDbContext<PedidosDbContext>(o =>
+        services.AddDbContext<PedidosDbContext>((sp, o) =>
         {
-            if (op.Banco.Equals("Postgres", StringComparison.OrdinalIgnoreCase))
-                o.UseNpgsql(config.GetConnectionString("Postgres") ?? throw new InvalidOperationException("ConnectionStrings:Postgres ausente"));
+            var cfg = sp.GetRequiredService<IConfiguration>();
+            if (Eh(sp, op => op.Banco, "Postgres"))
+                o.UseNpgsql(cfg.GetConnectionString("Postgres") ?? throw new InvalidOperationException("ConnectionStrings:Postgres ausente"));
             else
-                o.UseSqlite(config.GetConnectionString("Sqlite") ?? "Data Source=pedidos.db");
+                o.UseSqlite(cfg.GetConnectionString("Sqlite") ?? "Data Source=pedidos.db");
         });
         services.AddScoped<IRepositorioPedidos, RepositorioPedidos>();
         services.AddScoped<IConsultaPedidos, ConsultaPedidos>();
@@ -44,32 +54,29 @@ public static class RegistroInfra
         services.AddScoped<RelayOutbox>();
         services.AddScoped<ProcessadorFaturamento>();
 
-        if (op.Mensageria.Equals("RabbitMq", StringComparison.OrdinalIgnoreCase))
-        {
-            services.AddSingleton(new ConexaoRabbitMq(config.GetConnectionString("RabbitMq") ?? throw new InvalidOperationException("ConnectionStrings:RabbitMq ausente")));
-            services.AddSingleton<IBarramento, BarramentoRabbitMq>();
-        }
-        else
-        {
-            services.AddSingleton<BarramentoEmMemoria>();
-            services.AddSingleton<IBarramento>(sp => sp.GetRequiredService<BarramentoEmMemoria>());
-        }
+        services.AddSingleton<BarramentoEmMemoria>();
+        services.AddSingleton(sp => new ConexaoRabbitMq(sp.GetRequiredService<IConfiguration>().GetConnectionString("RabbitMq") ?? throw new InvalidOperationException("ConnectionStrings:RabbitMq ausente")));
+        services.AddSingleton<IBarramento>(sp => Eh(sp, op => op.Mensageria, "RabbitMq")
+            ? new BarramentoRabbitMq(sp.GetRequiredService<ConexaoRabbitMq>(), sp.GetRequiredService<ILogger<BarramentoRabbitMq>>())
+            : sp.GetRequiredService<BarramentoEmMemoria>());
 
-        if (op.Cache.Equals("Redis", StringComparison.OrdinalIgnoreCase))
-            services.AddStackExchangeRedisCache(o => { o.Configuration = config.GetConnectionString("Redis"); o.InstanceName = "pedidos:"; });
-        else
-            services.AddDistributedMemoryCache();
+        services.AddSingleton<IDistributedCache>(sp => Eh(sp, op => op.Cache, "Redis")
+            ? new RedisCache(Options.Create(new RedisCacheOptions { Configuration = sp.GetRequiredService<IConfiguration>().GetConnectionString("Redis"), InstanceName = "pedidos:" }))
+            : new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));
 
         return services;
     }
 
+    private static bool Eh(IServiceProvider sp, Func<OpcoesInfra, string> campo, string valor) =>
+        campo(sp.GetRequiredService<OpcoesInfra>()).Equals(valor, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Worker: relay do outbox e consumidor de faturamento, na variante do barramento configurado.</summary>
     public static IServiceCollection AdicionarWorker(this IServiceCollection services, IConfiguration config)
     {
-        var op = LerOpcoes(config);
         services.AddHostedService<ServicoRelayOutbox>();
-        if (op.Mensageria.Equals("RabbitMq", StringComparison.OrdinalIgnoreCase)) services.AddHostedService<ConsumidorFaturamentoRabbitMq>();
-        else services.AddHostedService<ConsumidorFaturamentoEmMemoria>();
+        services.AddSingleton<IHostedService>(sp => Eh(sp, op => op.Mensageria, "RabbitMq")
+            ? ActivatorUtilities.CreateInstance<ConsumidorFaturamentoRabbitMq>(sp)
+            : ActivatorUtilities.CreateInstance<ConsumidorFaturamentoEmMemoria>(sp));
         return services;
     }
 
