@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+jobs:
+  testes:
+    name: Testes unitários e de API (SQLite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet restore
+      - run: dotnet build -c Release --no-restore
+      - run: dotnet test -c Release --no-build --logger "trx;LogFileName=unitarios.trx"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resultados-unitarios
+          path: "**/TestResults/*.trx"
+
+  integracao:
+    name: Testes de integração (PostgreSQL, RabbitMQ, Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: pedidos
+          POSTGRES_USER: pedidos
+          POSTGRES_PASSWORD: pedidos
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pedidos -d pedidos"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pedidos
+          RABBITMQ_DEFAULT_PASS: pedidos
+        ports: ["5672:5672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      PEDIDOS_INTEGRACAO: "1"
+      PEDIDOS_POSTGRES: Host=localhost;Port=5432;Database=pedidos;Username=pedidos;Password=pedidos
+      PEDIDOS_RABBITMQ: amqp://pedidos:pedidos@localhost:5672/
+      PEDIDOS_REDIS: localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet restore
+      - run: dotnet build -c Release --no-restore
+      - name: Testes de API contra as dependências reais
+        run: dotnet test -c Release --no-build --filter "FullyQualifiedName~ApiTests" --logger "trx;LogFileName=integracao.trx"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resultados-integracao
+          path: "**/TestResults/*.trx"
+
+  imagens:
+    name: Imagens Docker
+    runs-on: ubuntu-latest
+    needs: [testes, integracao]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar docker-compose
+        run: docker compose config --quiet
+      - uses: docker/setup-buildx-action@v3
+      - name: Login no GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: API
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/Pedidos.Api/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/condedeveloper/pedidos-api:latest
+            ghcr.io/condedeveloper/pedidos-api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/Pedidos.Worker/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/condedeveloper/pedidos-worker:latest
+            ghcr.io/condedeveloper/pedidos-worker:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
