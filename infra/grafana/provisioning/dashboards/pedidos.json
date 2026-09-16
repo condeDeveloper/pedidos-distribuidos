@@ -1,0 +1,44 @@
+{
+  "title": "Pedidos API",
+  "uid": "pedidos-api",
+  "schemaVersion": 39,
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Pedidos criados",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 5 },
+      "targets": [{ "expr": "sum(pedidos_criados_total)", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Pagamentos confirmados",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 5 },
+      "targets": [{ "expr": "sum(pedidos_pagos_total)", "refId": "A" }]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Requisições por segundo por status",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [{ "expr": "sum by (code) (rate(http_requests_received_total[1m]))", "legendFormat": "{{code}}", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Latência p95 (s)",
+      "gridPos": { "x": 0, "y": 5, "w": 12, "h": 8 },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Requisições em andamento",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 5 },
+      "targets": [{ "expr": "sum(http_requests_in_progress)", "refId": "A" }]
+    }
+  ]
+}
